@@ -5,16 +5,16 @@ import glob
 from collections import deque
 from ultralytics import YOLO
 
-FRAME_W         = 0
-FRAME_H         = 0
+# ---------------------------- DISPLAY SIZING ----------------------------
 MAX_DISPLAY_W   = 800
 MAX_DISPLAY_H   = 600
 MIN_DISPLAY_W   = 400
 MIN_DISPLAY_H   = 300
+
+# ---------------------------- COMMON PARAMETERS ----------------------------
 CONF_THRESH     = 0.4
 HISTORY_LEN     = 12
-SMOOTHING_ALPHA = 0.52
-MAX_MISS_FRAMES = 8
+SMOOTHING_ALPHA = 0.7          # from second code (0.7, not 0.52)
 YOLO_SKIP_FRAMES = 3
 
 IMPORTANT_CLASSES = {
@@ -25,6 +25,7 @@ IMPORTANT_CLASSES = {
 
 FOLDER_PATH = r"C:\Users\Rameen Shahid\Downloads\DIP Project Videos"
 
+# ---------------------------- COLOURS ----------------------------
 C_GREEN  = (0,  220,  80)
 C_RED    = (30,  30, 230)
 C_YELLOW = (0,  210, 255)
@@ -32,46 +33,34 @@ C_WHITE  = (240, 240, 240)
 C_DARK   = (18,  18,  18)
 C_ACCENT = (0,  180, 255)
 
+# ---------------------------- LANE DETECTOR (SECOND CODE LOGIC) ----------------------------
 class LaneDetector:
     def __init__(self):
         self.prev_left  = None
         self.prev_right = None
-        self.left_miss  = 0
-        self.right_miss = 0
         self.history    = deque(maxlen=HISTORY_LEN)
 
     def get_edges(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        sigma = 0.33
-        med   = np.median(blur)
-        lo    = int(max(0, (1.0 - sigma) * med))
-        hi    = int(min(255, (1.0 + sigma) * med))
-        return cv2.Canny(blur, lo, hi)
+        # Fixed Canny thresholds (from second code)
+        return cv2.Canny(blur, 70, 180)
 
     def region_of_interest(self, edges):
         h, w = edges.shape
-        row_sums  = np.sum(edges, axis=1)
-        threshold = w * 0.04 * 255
-        horizon   = int(h * 0.45)
-        for r in range(int(h * 0.3), int(h * 0.65)):
-            if row_sums[r] > threshold:
-                horizon = r
-                break
-        horizon = max(int(h * 0.35), min(horizon, int(h * 0.62)))
         mask = np.zeros_like(edges)
+        # Fixed ROI polygon (second code)
         poly = np.array([[
             (int(0.05 * w), h),
             (int(0.95 * w), h),
-            (int(0.65 * w), horizon),
-            (int(0.35 * w), horizon)
+            (int(0.65 * w), int(0.55 * h)),
+            (int(0.35 * w), int(0.55 * h))
         ]])
         cv2.fillPoly(mask, poly, 255)
         return cv2.bitwise_and(edges, mask)
 
     def get_raw_lines(self, edges):
-        h, w = edges.shape
         lines = cv2.HoughLinesP(edges, 1, np.pi/180, 50,
                                 minLineLength=50, maxLineGap=100)
         left, right = [], []
@@ -82,48 +71,44 @@ class LaneDetector:
             if x2 == x1:
                 continue
             slope = (y2 - y1) / (x2 - x1)
-            if abs(slope) < 0.5 or abs(slope) > 2.0:
+            if abs(slope) < 0.5 or abs(slope) > 2:
                 continue
-            if slope < 0 and x1 < w*0.55 and x2 < w*0.55:
+            if slope < 0:
                 left.append((x1, y1, x2, y2))
-            elif slope > 0 and x1 > w*0.45 and x2 > w*0.45:
+            else:
                 right.append((x1, y1, x2, y2))
         return left, right
 
     def average_line(self, lines):
         if not lines:
             return None
-        xs, ys, ws = [], [], []
+        xs, ys = [], []
         for x1, y1, x2, y2 in lines:
-            length = np.hypot(x2-x1, y2-y1)
             xs += [x1, x2]
             ys += [y1, y2]
-            ws += [length, length]
-        try:
-            poly = np.polyfit(ys, xs, 1, w=ws)
-        except np.linalg.LinAlgError:
-            return None
+        # Unweighted polyfit (second code)
+        poly = np.polyfit(ys, xs, 1)
         y_bot = FRAME_H
-        y_top = int(FRAME_H * 0.60)
+        y_top = int(FRAME_H * 0.6)
         return (int(np.polyval(poly, y_bot)), y_bot,
                 int(np.polyval(poly, y_top)), y_top)
 
-    def _smooth(self, new_line, prev_line, miss_count):
+    def _smooth(self, new_line, prev_line):
         if new_line is None:
-            if miss_count >= MAX_MISS_FRAMES:
-                return None
             return prev_line
         if prev_line is None:
             return new_line
+        # Smoothing from second code (weights reversed compared to first)
         return tuple(
-            int(SMOOTHING_ALPHA * n + (1.0 - SMOOTHING_ALPHA) * p)
-            for n, p in zip(new_line, prev_line)
+            int(SMOOTHING_ALPHA * p + (1 - SMOOTHING_ALPHA) * n)
+            for p, n in zip(prev_line, new_line)
         )
 
     def get_direction(self, left_line, right_line):
         w = FRAME_W
         center = w // 2
         lane_w = int(w * 0.4)
+
         if left_line and right_line:
             lane_center = (left_line[0] + right_line[0]) // 2
         elif left_line:
@@ -132,6 +117,7 @@ class LaneDetector:
             lane_center = right_line[0] - int(lane_w * 0.9)
         else:
             return "STRAIGHT"
+
         dev = lane_center - center
         if abs(dev) < w * 0.08:
             return "STRAIGHT"
@@ -141,17 +127,14 @@ class LaneDetector:
         edges = self.get_edges(frame)
         roi = self.region_of_interest(edges)
         left_raw, right_raw = self.get_raw_lines(roi)
-        raw_left  = self.average_line(left_raw)
-        raw_right = self.average_line(right_raw)
 
-        self.left_miss  = 0 if raw_left  is not None else self.left_miss + 1
-        self.right_miss = 0 if raw_right is not None else self.right_miss + 1
+        left_line = self._smooth(self.average_line(left_raw), self.prev_left)
+        right_line = self._smooth(self.average_line(right_raw), self.prev_right)
 
-        left_line  = self._smooth(raw_left,  self.prev_left,  self.left_miss)
-        right_line = self._smooth(raw_right, self.prev_right, self.right_miss)
-
-        if left_line:  self.prev_left  = left_line
-        if right_line: self.prev_right = right_line
+        if left_line:
+            self.prev_left = left_line
+        if right_line:
+            self.prev_right = right_line
 
         direction = self.get_direction(left_line, right_line)
         self.history.append(direction)
@@ -159,6 +142,8 @@ class LaneDetector:
 
         return left_line, right_line, direction
 
+
+# ---------------------------- DRAWING FUNCTIONS (UNIFIED) ----------------------------
 def draw_lanes(frame, left_line, right_line):
     overlay = frame.copy()
     if left_line and right_line:
@@ -176,6 +161,7 @@ def draw_lanes(frame, left_line, right_line):
                      colour, 4, cv2.LINE_AA)
     return frame
 
+
 def draw_detections(frame, boxes, names):
     h, w = frame.shape[:2]
     for box in boxes:
@@ -184,34 +170,40 @@ def draw_detections(frame, boxes, names):
             continue
         x1, y1, x2, y2 = map(int, box.xyxy[0])
         conf = float(box.conf[0])
-        bh, cx = y2 - y1, (x1 + x2)//2
-        is_threat = (bh > h*0.25 and w*0.25 <= cx <= w*0.75)
+        bh = y2 - y1
+        cx = (x1 + x2) // 2
+        is_threat = (bh > h * 0.25 and w * 0.25 <= cx <= w * 0.75)
         colour = C_RED if is_threat else C_ACCENT
+
         cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 2)
         label = f"{name}  {conf:.0%}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
         pad = 4
-        cv2.rectangle(frame, (x1, y1 - th - 2*pad), (x1 + tw + 2*pad, y1), colour, -1)
+        cv2.rectangle(frame, (x1, y1 - th - 2 * pad), (x1 + tw + 2 * pad, y1), colour, -1)
         cv2.putText(frame, label, (x1 + pad, y1 - pad),
                     cv2.FONT_HERSHEY_DUPLEX, 0.45, C_DARK, 1, cv2.LINE_AA)
     return frame
 
+
 def draw_hud(frame, lane_direction, avoid_direction, obj_count):
     h, w = frame.shape[:2]
 
+    # Bottom bar (height scales with frame size, but keep readable)
     bar_h = max(40, min(90, int(h * 0.10)))
-
-    scale = w / 800
-    font_small = max(0.35, min(0.6, 0.4 * scale))
-    font_large = max(0.55, min(1.0, 0.7 * scale))
-
     y0 = h - bar_h
 
+    # Dark overlay for HUD area
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, y0), (w, h), C_DARK, -1)
     frame = cv2.addWeighted(overlay, 0.75, frame, 0.25, 0)
     cv2.line(frame, (0, y0), (w, y0), C_ACCENT, 2)
 
+    # Adaptive font sizes
+    scale = w / 800
+    font_small = max(0.35, min(0.6, 0.4 * scale))
+    font_large = max(0.55, min(1.0, 0.7 * scale))
+
+    # Three equal columns
     sec_w = w // 3
     centers = [sec_w // 2, sec_w + sec_w // 2, 2 * sec_w + sec_w // 2]
 
@@ -226,23 +218,27 @@ def draw_hud(frame, lane_direction, avoid_direction, obj_count):
                     (center_x - lw // 2, label_y),
                     cv2.FONT_HERSHEY_DUPLEX, font_small,
                     C_ACCENT, 1, cv2.LINE_AA)
-
         cv2.putText(frame, value,
                     (center_x - vw // 2, value_y),
                     cv2.FONT_HERSHEY_DUPLEX, font_large,
                     val_color, 2, cv2.LINE_AA)
 
+    # Column 1: LANE
     lane_col = C_GREEN if lane_direction == "STRAIGHT" else C_YELLOW
     put(centers[0], "LANE", lane_direction, lane_col)
 
+    # Column 2: AVOID
     avoid_col = C_GREEN if avoid_direction == "GO" else C_YELLOW
     put(centers[1], "AVOID", avoid_direction, avoid_col)
 
+    # Column 3: OBJECTS
     put(centers[2], "OBJECTS", str(obj_count), C_WHITE)
 
+    # Column dividers
     cv2.line(frame, (sec_w, y0 + 10), (sec_w, h - 10), C_ACCENT, 1)
     cv2.line(frame, (2 * sec_w, y0 + 10), (2 * sec_w, h - 10), C_ACCENT, 1)
 
+    # Top-left logo
     cv2.putText(frame, "VISION PIPELINE",
                 (10, 30),
                 cv2.FONT_HERSHEY_DUPLEX,
@@ -250,6 +246,8 @@ def draw_hud(frame, lane_direction, avoid_direction, obj_count):
 
     return frame
 
+
+# ---------------------------- HELPER FUNCTIONS (from first code) ----------------------------
 def compute_display_size(src_w, src_h):
     if src_w <= MAX_DISPLAY_W and src_h <= MAX_DISPLAY_H:
         return src_w, src_h
@@ -265,7 +263,6 @@ def compute_display_size(src_w, src_h):
         scale_w_min = MIN_DISPLAY_W / src_w
         scale_h_min = MIN_DISPLAY_H / src_h
         scale = max(scale_w_min, scale_h_min)
-
         new_w = int(src_w * scale)
         new_h = int(src_h * scale)
 
@@ -273,6 +270,7 @@ def compute_display_size(src_w, src_h):
     new_h = min(new_h, MAX_DISPLAY_H)
 
     return new_w, new_h
+
 
 def get_avoid_direction(boxes, frame_width, frame_height):
     left_threats = 0
@@ -291,14 +289,12 @@ def get_avoid_direction(boxes, frame_width, frame_height):
 
     if left_threats == 0 and right_threats == 0:
         return "GO"
+    return "LEFT" if left_threats > right_threats else "RIGHT"
 
-    if right_threats > left_threats:
-        return "LEFT"
-    else:
-        return "RIGHT"
 
+# ---------------------------- MAIN PIPELINE ----------------------------
 def run_pipeline(video_path, model):
-    global FRAME_W, FRAME_H
+    global FRAME_W, FRAME_H   # these are set per video
 
     cap = cv2.VideoCapture(video_path)
     title = os.path.basename(video_path)
@@ -325,9 +321,11 @@ def run_pipeline(video_path, model):
 
         frame = cv2.resize(frame, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
 
+        # Lane detection
         left_line, right_line, lane_direction = lane_detector.process(frame)
         frame = draw_lanes(frame, left_line, right_line)
 
+        # YOLO every N frames
         if frame_idx % YOLO_SKIP_FRAMES == 0:
             results = model(frame, conf=CONF_THRESH, verbose=False)[0]
             last_boxes = results.boxes if results.boxes else None
@@ -354,6 +352,7 @@ def run_pipeline(video_path, model):
     cap.release()
     cv2.destroyAllWindows()
 
+
 def main():
     print("Loading YOLOv8 model ...")
     model = YOLO('yolov8n.pt')
@@ -372,6 +371,7 @@ def main():
         run_pipeline(v, model)
 
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
