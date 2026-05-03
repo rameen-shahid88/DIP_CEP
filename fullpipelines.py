@@ -8,10 +8,13 @@ from ultralytics import YOLO
 FRAME_W         = 0
 FRAME_H         = 0
 MAX_DISPLAY_W   = 800
+MAX_DISPLAY_H   = 600
+MIN_DISPLAY_W   = 400
+MIN_DISPLAY_H   = 300
 CONF_THRESH     = 0.4
 HISTORY_LEN     = 12
 SMOOTHING_ALPHA = 0.52
-MAX_MISS_FRAMES  = 8
+MAX_MISS_FRAMES = 8
 YOLO_SKIP_FRAMES = 3
 
 IMPORTANT_CLASSES = {
@@ -29,7 +32,6 @@ C_WHITE  = (240, 240, 240)
 C_DARK   = (18,  18,  18)
 C_ACCENT = (0,  180, 255)
 
-
 class LaneDetector:
     def __init__(self):
         self.prev_left  = None
@@ -39,17 +41,17 @@ class LaneDetector:
         self.history    = deque(maxlen=HISTORY_LEN)
 
     def get_edges(self, frame):
-        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray  = cv2.equalizeHist(gray)
-        blur  = cv2.GaussianBlur(gray, (5, 5), 0)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
         sigma = 0.33
         med   = np.median(blur)
-        lo    = int(max(0,   (1.0 - sigma) * med))
+        lo    = int(max(0, (1.0 - sigma) * med))
         hi    = int(min(255, (1.0 + sigma) * med))
         return cv2.Canny(blur, lo, hi)
 
     def region_of_interest(self, edges):
-        h, w      = edges.shape
+        h, w = edges.shape
         row_sums  = np.sum(edges, axis=1)
         threshold = w * 0.04 * 255
         horizon   = int(h * 0.45)
@@ -58,8 +60,8 @@ class LaneDetector:
                 horizon = r
                 break
         horizon = max(int(h * 0.35), min(horizon, int(h * 0.62)))
-        mask    = np.zeros_like(edges)
-        poly    = np.array([[
+        mask = np.zeros_like(edges)
+        poly = np.array([[
             (int(0.05 * w), h),
             (int(0.95 * w), h),
             (int(0.65 * w), horizon),
@@ -69,8 +71,8 @@ class LaneDetector:
         return cv2.bitwise_and(edges, mask)
 
     def get_raw_lines(self, edges):
-        h, w  = edges.shape
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 50,
+        h, w = edges.shape
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 50,
                                 minLineLength=50, maxLineGap=100)
         left, right = [], []
         if lines is None:
@@ -82,9 +84,9 @@ class LaneDetector:
             slope = (y2 - y1) / (x2 - x1)
             if abs(slope) < 0.5 or abs(slope) > 2.0:
                 continue
-            if slope < 0 and x1 < w * 0.55 and x2 < w * 0.55:
+            if slope < 0 and x1 < w*0.55 and x2 < w*0.55:
                 left.append((x1, y1, x2, y2))
-            elif slope > 0 and x1 > w * 0.45 and x2 > w * 0.45:
+            elif slope > 0 and x1 > w*0.45 and x2 > w*0.45:
                 right.append((x1, y1, x2, y2))
         return left, right
 
@@ -93,10 +95,10 @@ class LaneDetector:
             return None
         xs, ys, ws = [], [], []
         for x1, y1, x2, y2 in lines:
-            length = np.hypot(x2 - x1, y2 - y1)
-            xs    += [x1, x2]
-            ys    += [y1, y2]
-            ws    += [length, length]
+            length = np.hypot(x2-x1, y2-y1)
+            xs += [x1, x2]
+            ys += [y1, y2]
+            ws += [length, length]
         try:
             poly = np.polyfit(ys, xs, 1, w=ws)
         except np.linalg.LinAlgError:
@@ -119,7 +121,7 @@ class LaneDetector:
         )
 
     def get_direction(self, left_line, right_line):
-        w      = FRAME_W
+        w = FRAME_W
         center = w // 2
         lane_w = int(w * 0.4)
         if left_line and right_line:
@@ -136,20 +138,20 @@ class LaneDetector:
         return "RIGHT" if dev > 0 else "LEFT"
 
     def process(self, frame):
-        edges               = self.get_edges(frame)
-        roi                 = self.region_of_interest(edges)
+        edges = self.get_edges(frame)
+        roi = self.region_of_interest(edges)
         left_raw, right_raw = self.get_raw_lines(roi)
-        raw_left            = self.average_line(left_raw)
-        raw_right           = self.average_line(right_raw)
+        raw_left  = self.average_line(left_raw)
+        raw_right = self.average_line(right_raw)
 
-        self.left_miss  = 0 if raw_left  is not None else self.left_miss  + 1
+        self.left_miss  = 0 if raw_left  is not None else self.left_miss + 1
         self.right_miss = 0 if raw_right is not None else self.right_miss + 1
 
         left_line  = self._smooth(raw_left,  self.prev_left,  self.left_miss)
         right_line = self._smooth(raw_right, self.prev_right, self.right_miss)
 
-        if left_line  is not None: self.prev_left  = left_line
-        if right_line is not None: self.prev_right = right_line
+        if left_line:  self.prev_left  = left_line
+        if right_line: self.prev_right = right_line
 
         direction = self.get_direction(left_line, right_line)
         self.history.append(direction)
@@ -157,13 +159,12 @@ class LaneDetector:
 
         return left_line, right_line, direction
 
-
 def draw_lanes(frame, left_line, right_line):
     overlay = frame.copy()
     if left_line and right_line:
         pts = np.array([
-            [left_line[0],  left_line[1]],
-            [left_line[2],  left_line[3]],
+            [left_line[0], left_line[1]],
+            [left_line[2], left_line[3]],
             [right_line[2], right_line[3]],
             [right_line[0], right_line[1]]
         ], dtype=np.int32)
@@ -175,7 +176,6 @@ def draw_lanes(frame, left_line, right_line):
                      colour, 4, cv2.LINE_AA)
     return frame
 
-
 def draw_detections(frame, boxes, names):
     h, w = frame.shape[:2]
     for box in boxes:
@@ -183,58 +183,124 @@ def draw_detections(frame, boxes, names):
         if name not in IMPORTANT_CLASSES:
             continue
         x1, y1, x2, y2 = map(int, box.xyxy[0])
-        conf            = float(box.conf[0])
-        bh, cx          = y2 - y1, (x1 + x2) // 2
-        is_threat       = (bh > h * 0.25 and w * 0.25 <= cx <= w * 0.75)
-        colour          = C_RED if is_threat else C_ACCENT
+        conf = float(box.conf[0])
+        bh, cx = y2 - y1, (x1 + x2)//2
+        is_threat = (bh > h*0.25 and w*0.25 <= cx <= w*0.75)
+        colour = C_RED if is_threat else C_ACCENT
         cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 2)
-        label       = f"{name}  {conf:.0%}"
+        label = f"{name}  {conf:.0%}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
-        pad         = 4
+        pad = 4
         cv2.rectangle(frame, (x1, y1 - th - 2*pad), (x1 + tw + 2*pad, y1), colour, -1)
         cv2.putText(frame, label, (x1 + pad, y1 - pad),
                     cv2.FONT_HERSHEY_DUPLEX, 0.45, C_DARK, 1, cv2.LINE_AA)
     return frame
 
+def draw_hud(frame, lane_direction, avoid_direction, obj_count):
+    h, w = frame.shape[:2]
 
-def draw_hud(frame, direction, decision, obj_count):
-    h, w  = frame.shape[:2]
-    bar_h = 72
-    bar   = frame[h - bar_h:h, :].copy()
-    cv2.rectangle(bar, (0, 0), (w, bar_h), C_DARK, -1)
-    frame[h - bar_h:h, :] = cv2.addWeighted(bar, 0.72, frame[h - bar_h:h, :], 0.28, 0)
-    cv2.line(frame, (0, h - bar_h), (w, h - bar_h), C_ACCENT, 1)
+    bar_h = max(40, min(90, int(h * 0.10)))
 
-    dir_col = C_GREEN if direction == "STRAIGHT" else C_YELLOW
-    cv2.putText(frame, "LANE",      (28, h - bar_h + 22), cv2.FONT_HERSHEY_DUPLEX, 0.45, C_ACCENT, 1, cv2.LINE_AA)
-    cv2.putText(frame, direction,   (28, h - bar_h + 52), cv2.FONT_HERSHEY_DUPLEX, 0.85, dir_col,  2, cv2.LINE_AA)
+    scale = w / 800
+    font_small = max(0.35, min(0.6, 0.4 * scale))
+    font_large = max(0.55, min(1.0, 0.7 * scale))
 
-    cv2.line(frame, (w//3, h - bar_h + 10), (w//3, h - 10), C_ACCENT, 1)
+    y0 = h - bar_h
 
-    dec_col = C_RED if decision == "STOP" else C_GREEN
-    cv2.putText(frame, "DECISION",  (w//3 + 28, h - bar_h + 22), cv2.FONT_HERSHEY_DUPLEX, 0.45, C_ACCENT, 1, cv2.LINE_AA)
-    cv2.putText(frame, decision,    (w//3 + 28, h - bar_h + 52), cv2.FONT_HERSHEY_DUPLEX, 0.95, dec_col,  2, cv2.LINE_AA)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, y0), (w, h), C_DARK, -1)
+    frame = cv2.addWeighted(overlay, 0.75, frame, 0.25, 0)
+    cv2.line(frame, (0, y0), (w, y0), C_ACCENT, 2)
 
-    cv2.line(frame, (2*w//3, h - bar_h + 10), (2*w//3, h - 10), C_ACCENT, 1)
+    sec_w = w // 3
+    centers = [sec_w // 2, sec_w + sec_w // 2, 2 * sec_w + sec_w // 2]
 
-    cv2.putText(frame, "OBJECTS",       (2*w//3 + 28, h - bar_h + 22), cv2.FONT_HERSHEY_DUPLEX, 0.45, C_ACCENT, 1, cv2.LINE_AA)
-    cv2.putText(frame, str(obj_count),  (2*w//3 + 28, h - bar_h + 52), cv2.FONT_HERSHEY_DUPLEX, 0.95, C_WHITE,  2, cv2.LINE_AA)
+    def put(center_x, label, value, val_color=C_WHITE):
+        label_y = y0 + int(bar_h * 0.35)
+        value_y = y0 + int(bar_h * 0.75)
 
-    cv2.putText(frame, "VISION PIPELINE", (14, 30), cv2.FONT_HERSHEY_DUPLEX, 0.6, C_ACCENT, 1, cv2.LINE_AA)
+        (lw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, font_small, 1)
+        (vw, _), _ = cv2.getTextSize(value, cv2.FONT_HERSHEY_DUPLEX, font_large, 2)
+
+        cv2.putText(frame, label,
+                    (center_x - lw // 2, label_y),
+                    cv2.FONT_HERSHEY_DUPLEX, font_small,
+                    C_ACCENT, 1, cv2.LINE_AA)
+
+        cv2.putText(frame, value,
+                    (center_x - vw // 2, value_y),
+                    cv2.FONT_HERSHEY_DUPLEX, font_large,
+                    val_color, 2, cv2.LINE_AA)
+
+    lane_col = C_GREEN if lane_direction == "STRAIGHT" else C_YELLOW
+    put(centers[0], "LANE", lane_direction, lane_col)
+
+    avoid_col = C_GREEN if avoid_direction == "GO" else C_YELLOW
+    put(centers[1], "AVOID", avoid_direction, avoid_col)
+
+    put(centers[2], "OBJECTS", str(obj_count), C_WHITE)
+
+    cv2.line(frame, (sec_w, y0 + 10), (sec_w, h - 10), C_ACCENT, 1)
+    cv2.line(frame, (2 * sec_w, y0 + 10), (2 * sec_w, h - 10), C_ACCENT, 1)
+
+    cv2.putText(frame, "VISION PIPELINE",
+                (10, 30),
+                cv2.FONT_HERSHEY_DUPLEX,
+                0.6, C_ACCENT, 1, cv2.LINE_AA)
+
     return frame
 
-
 def compute_display_size(src_w, src_h):
-    if src_w <= MAX_DISPLAY_W:
+    if src_w <= MAX_DISPLAY_W and src_h <= MAX_DISPLAY_H:
         return src_w, src_h
-    scale = MAX_DISPLAY_W / src_w
-    return MAX_DISPLAY_W, int(src_h * scale)
 
+    scale_w = MAX_DISPLAY_W / src_w
+    scale_h = MAX_DISPLAY_H / src_h
+    scale = min(scale_w, scale_h)
+
+    new_w = int(src_w * scale)
+    new_h = int(src_h * scale)
+
+    if new_w < MIN_DISPLAY_W or new_h < MIN_DISPLAY_H:
+        scale_w_min = MIN_DISPLAY_W / src_w
+        scale_h_min = MIN_DISPLAY_H / src_h
+        scale = max(scale_w_min, scale_h_min)
+
+        new_w = int(src_w * scale)
+        new_h = int(src_h * scale)
+
+    new_w = min(new_w, MAX_DISPLAY_W)
+    new_h = min(new_h, MAX_DISPLAY_H)
+
+    return new_w, new_h
+
+def get_avoid_direction(boxes, frame_width, frame_height):
+    left_threats = 0
+    right_threats = 0
+
+    for box in boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        bh = y2 - y1
+        cx = (x1 + x2) // 2
+
+        if bh > frame_height * 0.25 and frame_width * 0.25 <= cx <= frame_width * 0.75:
+            if cx < frame_width * 0.5:
+                left_threats += 1
+            else:
+                right_threats += 1
+
+    if left_threats == 0 and right_threats == 0:
+        return "GO"
+
+    if right_threats > left_threats:
+        return "LEFT"
+    else:
+        return "RIGHT"
 
 def run_pipeline(video_path, model):
     global FRAME_W, FRAME_H
 
-    cap   = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(video_path)
     title = os.path.basename(video_path)
 
     if not cap.isOpened():
@@ -246,10 +312,10 @@ def run_pipeline(video_path, model):
     FRAME_W, FRAME_H = compute_display_size(src_w, src_h)
     print(f"  Processing: {title}  ({src_w}x{src_h} -> {FRAME_W}x{FRAME_H})")
 
-    lane_detector  = LaneDetector()
-    frame_idx      = 0
-    last_boxes     = None
-    last_stop      = False
+    lane_detector = LaneDetector()
+    frame_idx = 0
+    last_boxes = None
+    last_avoid_dir = "GO"
     last_obj_count = 0
 
     while True:
@@ -259,31 +325,26 @@ def run_pipeline(video_path, model):
 
         frame = cv2.resize(frame, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
 
-        left_line, right_line, direction = lane_detector.process(frame)
+        left_line, right_line, lane_direction = lane_detector.process(frame)
         frame = draw_lanes(frame, left_line, right_line)
 
         if frame_idx % YOLO_SKIP_FRAMES == 0:
-            results        = model(frame, conf=CONF_THRESH, verbose=False)[0]
-            last_boxes     = results.boxes if results.boxes else None
-            last_stop      = False
+            results = model(frame, conf=CONF_THRESH, verbose=False)[0]
+            last_boxes = results.boxes if results.boxes else None
             last_obj_count = 0
             if last_boxes:
-                fh, fw = frame.shape[:2]
                 for box in last_boxes:
                     name = model.names[int(box.cls[0])]
-                    if name not in IMPORTANT_CLASSES:
-                        continue
-                    last_obj_count += 1
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    bh, cx = y2 - y1, (x1 + x2) // 2
-                    if bh > fh * 0.25 and fw * 0.25 <= cx <= fw * 0.75:
-                        last_stop = True
+                    if name in IMPORTANT_CLASSES:
+                        last_obj_count += 1
+                last_avoid_dir = get_avoid_direction(last_boxes, FRAME_W, FRAME_H)
+            else:
+                last_avoid_dir = "GO"
 
         if last_boxes:
             frame = draw_detections(frame, last_boxes, model.names)
 
-        decision = "STOP" if last_stop else "GO"
-        frame    = draw_hud(frame, direction, decision, last_obj_count)
+        frame = draw_hud(frame, lane_direction, last_avoid_dir, last_obj_count)
         frame_idx += 1
 
         cv2.imshow(f"Vision Pipeline — {title}", frame)
@@ -293,12 +354,11 @@ def run_pipeline(video_path, model):
     cap.release()
     cv2.destroyAllWindows()
 
-
 def main():
     print("Loading YOLOv8 model ...")
-    model  = YOLO('yolov8n.pt')
+    model = YOLO('yolov8n.pt')
 
-    exts   = ['*.mp4', '*.avi', '*.mov', '*.mkv']
+    exts = ['*.mp4', '*.avi', '*.mov', '*.mkv']
     videos = []
     for ext in exts:
         videos.extend(glob.glob(os.path.join(FOLDER_PATH, ext)))
@@ -312,7 +372,6 @@ def main():
         run_pipeline(v, model)
 
     print("Done.")
-
 
 if __name__ == "__main__":
     main()
