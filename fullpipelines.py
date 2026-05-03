@@ -238,7 +238,7 @@ def draw_hud(frame, lane_direction, avoid_direction, obj_count):
 
     # Column 2: avoid direction (which way to steer clear of obstacles)
     avoid_col = C_GREEN if avoid_direction == "GO" else C_YELLOW
-    put(centers[1], "AVOID", avoid_direction, avoid_col)
+    put(centers[1], "TURN (Object)", avoid_direction, avoid_col)
 
     # Column 3: object count
     put(centers[2], "OBJECTS", str(obj_count), C_WHITE)
